@@ -12,6 +12,14 @@ name: test_set_1
 on:
   workflow_call:
     inputs:
+      chalk_on:
+        description: "racecar: instrumented arm switch, passed down by the caller"
+        type: string
+        default: "false"
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
       libreswan_version:
         required: false
         type: string
@@ -31,11 +39,17 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ inputs.chalk_on }}
 
 jobs:
   test_set_1:
     runs-on: ubuntu-22.04
-    if: github.repository_owner == 'hwdsl2'
+    if: github.repository_owner == 'curiosity-tests'
     timeout-minutes: 120
     strategy:
       matrix:
@@ -48,9 +62,20 @@ jobs:
       TEST_UPGRADE_TO: ${{ inputs.upgrade_to_version }}
       SHOW_LIBRESWAN_BUILD_OUTPUT: ${{ inputs.show_libreswan_build_output }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
           persist-credentials: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Build
         run: |
           mkdir -p "$GITHUB_WORKSPACE/testing/${OS_VERSION//:}"
