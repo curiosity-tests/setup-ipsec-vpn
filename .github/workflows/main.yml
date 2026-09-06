@@ -47,7 +47,7 @@ run-name: "build ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
 jobs:
   shellcheck:
-    if: github.repository_owner == 'curiosity-tests'
+    if: github.repository_owner == 'hwdsl2'
     uses: ./.github/workflows/shellcheck.yml
     with:
       chalk_on: ${{ inputs.leg == 'instrumented' && 'true' || 'false' }}
