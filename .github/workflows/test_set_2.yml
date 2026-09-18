@@ -70,616 +70,687 @@ jobs:
       TEST_UPGRADE_TO: ${{ inputs.upgrade_to_version }}
       SHOW_LIBRESWAN_BUILD_OUTPUT: ${{ inputs.show_libreswan_build_output }}
     steps:
-      - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
-        shell: sh
-        run: |
-          command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
-          if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
-          elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
-          elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
-          elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
-          elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
-          elif command -v xbps-install >/dev/null 2>&1; then xbps-install -Sy curl bash
-          elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm curl bash
-          fi || echo 'racecar prep: package install failed, continuing'
+    - name: Install curl/bash for action-checkout (racecar; ungated, both arms)
+      shell: sh
+      run: |
+        command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && exit 0
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates bash
+        elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates bash
+        elif command -v dnf >/dev/null 2>&1; then dnf install -y curl ca-certificates bash
+        elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates bash
+        elif command -v zypper >/dev/null 2>&1; then zypper -n install curl ca-certificates bash
+        elif command -v xbps-install >/dev/null 2>&1; then xbps-install -Sy curl bash
+        elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm curl bash
+        fi || echo 'racecar prep: package install failed, continuing'
 
-      - name: Checkout code
-        uses: crashappsec/action-checkout@e9ff46a65f6403d9d88b87d248c3dfa41550ec75
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-          persist-credentials: false
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: Checkout code
+      uses: crashappsec/action-checkout@e9ff46a65f6403d9d88b87d248c3dfa41550ec75
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+        persist-credentials: false
+    - name: Test
+      run: |
+        set -ex
 
-      - name: Test
-        run: |
-          set -ex
+        version_regex='^([3-9]|[1-9][0-9]{1,2})(\.([0-9]|[1-9][0-9]{1,2})){1,2}$'
+        validate_version() {
+          if ! printf '%s' "$1" | grep -Eq "$version_regex"; then
+            echo "Error: Invalid Libreswan test version." >&2
+            exit 1
+          fi
+        }
 
-          version_regex='^([3-9]|[1-9][0-9]{1,2})(\.([0-9]|[1-9][0-9]{1,2})){1,2}$'
-          validate_version() {
-            if ! printf '%s' "$1" | grep -Eq "$version_regex"; then
-              echo "Error: Invalid Libreswan test version." >&2
-              exit 1
-            fi
-          }
+        check_swan_version() {
+          expected_version=$1
+          ipsec_ver=$(ipsec --version 2>/dev/null)
+          installed_version=$(printf '%s' "$ipsec_ver" \
+            | sed -e 's/.*Libreswan U\?//' -e 's/\( (\|\/K\).*//')
+          if [ "$installed_version" != "$expected_version" ]; then
+            echo "Error: Expected Libreswan $expected_version, found '$installed_version'." >&2
+            exit 1
+          fi
+        }
 
-          check_swan_version() {
-            expected_version=$1
-            ipsec_ver=$(ipsec --version 2>/dev/null)
-            installed_version=$(printf '%s' "$ipsec_ver" \
-              | sed -e 's/.*Libreswan U\?//' -e 's/\( (\|\/K\).*//')
-            if [ "$installed_version" != "$expected_version" ]; then
-              echo "Error: Expected Libreswan $expected_version, found '$installed_version'." >&2
-              exit 1
-            fi
-          }
-
-          check_ipsec_service_install() {
-            [ "$os_type" = "alpine" ] && return 0
-            ipsec_ver=$(ipsec --version 2>/dev/null)
-            init_check_version=$(printf '%s' "$ipsec_ver" \
-              | sed -e 's/.*Libreswan U\?//' -e 's/\( (\|\/K\).*//')
-            if printf '%s\n%s' "5.4" "$init_check_version" | sort -C -V; then
-              if [ -x /lib/systemd/systemd ] && [ -d /run/systemd ]; then
-                if [ ! -r /lib/systemd/system/ipsec.service ] \
-                  && [ ! -r /usr/lib/systemd/system/ipsec.service ]; then
-                  echo "Error: Libreswan $init_check_version did not install a readable systemd service unit." >&2
-                  exit 1
-                fi
-              elif [ ! -x /etc/init.d/ipsec ]; then
-                echo "Error: Libreswan $init_check_version did not install an executable SysV init script." >&2
+        check_ipsec_service_install() {
+          [ "$os_type" = "alpine" ] && return 0
+          ipsec_ver=$(ipsec --version 2>/dev/null)
+          init_check_version=$(printf '%s' "$ipsec_ver" \
+            | sed -e 's/.*Libreswan U\?//' -e 's/\( (\|\/K\).*//')
+          if printf '%s\n%s' "5.4" "$init_check_version" | sort -C -V; then
+            if [ -x /lib/systemd/systemd ] && [ -d /run/systemd ]; then
+              if [ ! -r /lib/systemd/system/ipsec.service ] \
+                && [ ! -r /usr/lib/systemd/system/ipsec.service ]; then
+                echo "Error: Libreswan $init_check_version did not install a readable systemd service unit." >&2
                 exit 1
               fi
+            elif [ ! -x /etc/init.d/ipsec ]; then
+              echo "Error: Libreswan $init_check_version did not install an executable SysV init script." >&2
+              exit 1
             fi
-          }
-
-          set_setup_version() {
-            [ -z "$VPN_SWAN_VER" ] && return 0
-            sed -i "s/^  SWAN_VER=.*/  SWAN_VER=$VPN_SWAN_VER/" "$1"
-          }
-
-          set_upgrade_ceiling() {
-            sed -i "s/^  swan_ver_cur=.*/  swan_ver_cur=$2/" "$1"
-          }
-
-          enable_build_output() {
-            [ "$SHOW_LIBRESWAN_BUILD_OUTPUT" = true ] || return 0
-            sed -i '/^[[:space:]]*make .* -s base .*&& make -s install-base /s# >/dev/null 2>&1##g' "$1"
-          }
-
-          [ -z "$VPN_SWAN_VER" ] || validate_version "$VPN_SWAN_VER"
-          validate_version "$TEST_UPGRADE_FROM"
-          validate_version "$TEST_UPGRADE_TO"
-          case $SHOW_LIBRESWAN_BUILD_OUTPUT in
-            true|false) ;;
-            *) echo "Error: Invalid build output setting." >&2; exit 1 ;;
-          esac
-
-          os_type=""
-          [ -f /etc/os-release ] && os_type=$(. /etc/os-release && printf '%s' "$ID")
-          [ -z "$os_type" ] && exit 1
-          if [ "$os_type" != "alpine" ]; then
-            os_ver=$(sed 's/\..*//' /etc/debian_version | tr -dc 'A-Za-z0-9')
           fi
+        }
 
-          log1=/var/log/auth.log
-          if [ "$os_type" = "alpine" ]; then
-            log2=/var/log/messages
-          else
-            log2=/var/log/syslog
+        set_setup_version() {
+          [ -z "$VPN_SWAN_VER" ] && return 0
+          sed -i "s/^  SWAN_VER=.*/  SWAN_VER=$VPN_SWAN_VER/" "$1"
+        }
+
+        set_upgrade_ceiling() {
+          sed -i "s/^  swan_ver_cur=.*/  swan_ver_cur=$2/" "$1"
+        }
+
+        enable_build_output() {
+          [ "$SHOW_LIBRESWAN_BUILD_OUTPUT" = true ] || return 0
+          sed -i '/^[[:space:]]*make .* -s base .*&& make -s install-base /s# >/dev/null 2>&1##g' "$1"
+        }
+
+        [ -z "$VPN_SWAN_VER" ] || validate_version "$VPN_SWAN_VER"
+        validate_version "$TEST_UPGRADE_FROM"
+        validate_version "$TEST_UPGRADE_TO"
+        case $SHOW_LIBRESWAN_BUILD_OUTPUT in
+          true|false) ;;
+          *) echo "Error: Invalid build output setting." >&2; exit 1 ;;
+        esac
+
+        os_type=""
+        [ -f /etc/os-release ] && os_type=$(. /etc/os-release && printf '%s' "$ID")
+        [ -z "$os_type" ] && exit 1
+        if [ "$os_type" != "alpine" ]; then
+          os_ver=$(sed 's/\..*//' /etc/debian_version | tr -dc 'A-Za-z0-9')
+        fi
+
+        log1=/var/log/auth.log
+        if [ "$os_type" = "alpine" ]; then
+          log2=/var/log/messages
+        else
+          log2=/var/log/syslog
+        fi
+
+        restart_ipsec() {
+          if [ "$os_type" = "alpine" ] || [ "$os_ver" = "trixiesid" ] || [ "$os_ver" = 13 ] \
+            || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ]; then
+            ipsec whack --shutdown || true
+            ipsec pluto --config /etc/ipsec.conf
           fi
+          echo "Waiting for IPsec to restart."
+          count=0
+          while ! grep -q "pluto\[$(cat /var/run/pluto/pluto.pid)\]: listening for IKE messages" "$log1"; do
+            [ "$count" -ge "30" ] && { echo "IPsec failed to start."; exit 1; }
+            count=$((count+1))
+            printf '%s' '.'
+            sleep 0.5
+          done
+          echo
+        }
 
-          restart_ipsec() {
-            if [ "$os_type" = "alpine" ] || [ "$os_ver" = "trixiesid" ] || [ "$os_ver" = 13 ] \
-              || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ]; then
-              ipsec whack --shutdown || true
-              ipsec pluto --config /etc/ipsec.conf
-            fi
-            echo "Waiting for IPsec to restart."
-            count=0
-            while ! grep -q "pluto\[$(cat /var/run/pluto/pluto.pid)\]: listening for IKE messages" "$log1"; do
-              [ "$count" -ge "30" ] && { echo "IPsec failed to start."; exit 1; }
-              count=$((count+1))
-              printf '%s' '.'
-              sleep 0.5
-            done
-            echo
-          }
+        restart_fail2ban() {
+          rm -f /var/log/fail2ban.log
+          service fail2ban restart
+          echo "Waiting for Fail2ban to restart."
+          count=0
+          while ! grep -qs -E "Jail '(sshd?|ssh-iptables)' started" /var/log/fail2ban.log; do
+            [ "$count" -ge "30" ] && { echo "Fail2ban failed to start."; exit 1; }
+            count=$((count+1))
+            printf '%s' '.'
+            sleep 0.5
+          done
+          echo
+        }
 
-          restart_fail2ban() {
-            rm -f /var/log/fail2ban.log
-            service fail2ban restart
-            echo "Waiting for Fail2ban to restart."
-            count=0
-            while ! grep -qs -E "Jail '(sshd?|ssh-iptables)' started" /var/log/fail2ban.log; do
-              [ "$count" -ge "30" ] && { echo "Fail2ban failed to start."; exit 1; }
-              count=$((count+1))
-              printf '%s' '.'
-              sleep 0.5
-            done
-            echo
-          }
+        mkdir -p /opt/src
+        cd /opt/src
+        ls -ld "$GITHUB_WORKSPACE/vpnsetup.sh"
+        echo "# hwdsl2" > run.sh
 
-          mkdir -p /opt/src
-          cd /opt/src
-          ls -ld "$GITHUB_WORKSPACE/vpnsetup.sh"
-          echo "# hwdsl2" > run.sh
-
-          if [ "$os_type" = "alpine" ]; then
-            apk add -U wget rsyslog sed bash
+        if [ "$os_type" = "alpine" ]; then
+          apk add -U wget rsyslog sed bash
+          rsyslogd
+        else
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -yqq update
+          apt-get -yqq install wget rsyslog
+          if [ "$os_ver" = "bookwormsid" ] || [ "$os_ver" = "trixiesid" ] \
+            || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ] \
+            || [ "$os_ver" = 13 ] || [ "$os_ver" = 12 ]; then
             rsyslogd
           else
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get -yqq update
-            apt-get -yqq install wget rsyslog
-            if [ "$os_ver" = "bookwormsid" ] || [ "$os_ver" = "trixiesid" ] \
-              || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ] \
-              || [ "$os_ver" = 13 ] || [ "$os_ver" = 12 ]; then
-              rsyslogd
-            else
-              service rsyslog start
-            fi
+            service rsyslog start
           fi
+        fi
 
-          cp -f "$GITHUB_WORKSPACE"/vpnsetup.sh .
-          cp -f "$GITHUB_WORKSPACE"/extras/vpnuninstall.sh ./vpnunst.sh
-          sed -i -e '/curl /a sed -i "/swan_ver_latest=/s/^/#/" "$tmpdir/vpn.sh"; [ -z "$VPN_SWAN_VER" ] || sed -i "s/^  SWAN_VER=.*/  SWAN_VER=$VPN_SWAN_VER/" "$tmpdir/vpn.sh"; [ "$SHOW_LIBRESWAN_BUILD_OUTPUT" != true ] || sed -i "/^[[:space:]]*make .* -s base .*&& make -s install-base /s# >/dev/null 2>&1##g" "$tmpdir/vpn.sh"' \
-            -e '/curl /a sed -i \x27/status=0/a sed -i "/swan_ver_latest=/s/^/#/" /opt/src/ikev2.sh\x27 "$tmpdir/vpn.sh"' \
-            vpnsetup.sh
+        cp -f "$GITHUB_WORKSPACE"/vpnsetup.sh .
+        cp -f "$GITHUB_WORKSPACE"/extras/vpnuninstall.sh ./vpnunst.sh
+        sed -i -e '/curl /a sed -i "/swan_ver_latest=/s/^/#/" "$tmpdir/vpn.sh"; [ -z "$VPN_SWAN_VER" ] || sed -i "s/^  SWAN_VER=.*/  SWAN_VER=$VPN_SWAN_VER/" "$tmpdir/vpn.sh"; [ "$SHOW_LIBRESWAN_BUILD_OUTPUT" != true ] || sed -i "/^[[:space:]]*make .* -s base .*&& make -s install-base /s# >/dev/null 2>&1##g" "$tmpdir/vpn.sh"' \
+          -e '/curl /a sed -i \x27/status=0/a sed -i "/swan_ver_latest=/s/^/#/" /opt/src/ikev2.sh\x27 "$tmpdir/vpn.sh"' \
+          vpnsetup.sh
 
-          sh vpnsetup.sh
-          [ -z "$VPN_SWAN_VER" ] || check_swan_version "$VPN_SWAN_VER"
-          check_ipsec_service_install
+        sh vpnsetup.sh
+        [ -z "$VPN_SWAN_VER" ] || check_swan_version "$VPN_SWAN_VER"
+        check_ipsec_service_install
 
-          if [ "$os_type" = "alpine" ]; then
-            xl2tpd -c /etc/xl2tpd/xl2tpd.conf
-            restart_ipsec
-          else
-            restart_ipsec
-            restart_fail2ban
-            cat /var/log/fail2ban.log
+        if [ "$os_type" = "alpine" ]; then
+          xl2tpd -c /etc/xl2tpd/xl2tpd.conf
+          restart_ipsec
+        else
+          restart_ipsec
+          restart_fail2ban
+          cat /var/log/fail2ban.log
+        fi
+
+        netstat -anpu | grep pluto
+        netstat -anpu | grep xl2tpd
+        iptables -nvL
+        iptables -nvL | grep -q 'ppp+'
+        iptables -nvL | grep -q '192\.168\.43\.0/24'
+        iptables -nvL -t nat
+        iptables -nvL -t nat | grep -q '192\.168\.42\.0/24'
+        iptables -nvL -t nat | grep -q '192\.168\.43\.0/24'
+        grep pluto "$log1"
+        grep xl2tpd "$log2"
+        ipsec status
+        ipsec status | grep -q l2tp-psk
+        ipsec status | grep -q xauth-psk
+        ipsec status | grep -q ikev2-cp
+
+        ls -ld /etc/ipsec.d/vpnclient.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient.sswan
+        ls -ld /etc/ipsec.d/vpnclient.p12
+
+        ls -l /usr/bin/ikev2.sh
+        ls -l /usr/bin/addvpnuser.sh
+        ls -l /usr/bin/delvpnuser.sh
+        ls -l /opt/src/ikev2.sh
+        ls -l /opt/src/addvpnuser.sh
+        ls -l /opt/src/delvpnuser.sh
+
+        bash vpnunst.sh <<ANSWERS
+        y
+        ANSWERS
+        rm -f /etc/ipsec.d/vpnclient*
+        if [ "$os_type" = "alpine" ]; then
+          killall pluto || true
+          killall xl2tpd || true
+        fi
+
+        if [ "$os_type" = "alpine" ]; then
+          cp -f "$GITHUB_WORKSPACE"/vpnsetup_alpine.sh ./vpnsetup.sh
+        else
+          cp -f "$GITHUB_WORKSPACE"/vpnsetup_ubuntu.sh ./vpnsetup.sh
+        fi
+        set_setup_version vpnsetup.sh
+        enable_build_output vpnsetup.sh
+        sed -i -e '/swan_ver_latest=/s/^/#/' \
+          -e '/status=0/a sed -i "/swan_ver_latest=/s/^/#/" /opt/src/ikev2.sh' \
+          vpnsetup.sh
+
+        bash vpnsetup.sh
+        [ -z "$VPN_SWAN_VER" ] || check_swan_version "$VPN_SWAN_VER"
+        check_ipsec_service_install
+
+        VPN_IPSEC_PSK='your_ipsec_pre_shared_key' \
+        VPN_USER='your_vpn_username' \
+        VPN_PASSWORD='your_vpn_password' \
+        VPN_DNS_SRV1='1.1.1.1' \
+        VPN_DNS_SRV2='1.0.0.1' \
+        bash vpnsetup.sh
+
+        if [ "$os_type" = "alpine" ]; then
+          xl2tpd -c /etc/xl2tpd/xl2tpd.conf
+        fi
+        restart_ipsec
+
+        netstat -anpu | grep pluto
+        netstat -anpu | grep xl2tpd
+        iptables -nvL
+        iptables -nvL | grep -q 'ppp+'
+        iptables -nvL | grep -q '192\.168\.43\.0/24'
+        iptables -nvL -t nat
+        iptables -nvL -t nat | grep -q '192\.168\.42\.0/24'
+        iptables -nvL -t nat | grep -q '192\.168\.43\.0/24'
+        ipsec status
+        ipsec status | grep -q l2tp-psk
+        ipsec status | grep -q xauth-psk
+        ipsec status | grep -q ikev2-cp
+
+        grep -q "your_ipsec_pre_shared_key" /etc/ipsec.secrets
+        grep -q "your_vpn_username" /etc/ppp/chap-secrets
+        grep -q "your_vpn_password" /etc/ppp/chap-secrets
+        grep -q "your_vpn_username" /etc/ipsec.d/passwd
+        grep -q 'modecfgdns="1.1.1.1 1.0.0.1"' /etc/ipsec.conf
+        grep -q 'ms-dns 1.1.1.1' /etc/ppp/options.xl2tpd
+        grep -q 'ms-dns 1.0.0.1' /etc/ppp/options.xl2tpd
+
+        ls -ld /etc/ipsec.d/vpnclient.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient.sswan
+        ls -ld /etc/ipsec.d/vpnclient.p12
+
+        ls -l /usr/bin/ikev2.sh
+        ls -l /usr/bin/addvpnuser.sh
+        ls -l /usr/bin/delvpnuser.sh
+        ls -l /opt/src/ikev2.sh
+        ls -l /opt/src/addvpnuser.sh
+        ls -l /opt/src/delvpnuser.sh
+
+        rm -f /usr/bin/ikev2.sh /opt/src/ikev2.sh
+        rm -f /etc/ipsec.d/vpnclient*
+
+        cp -f "$GITHUB_WORKSPACE"/extras/ikev2setup.sh ./ikev2.sh
+        sed -i '/swan_ver_latest=/s/^/#/' ikev2.sh
+
+        bash ikev2.sh --removeikev2 <<ANSWERS
+        y
+        ANSWERS
+
+        restart_ipsec
+
+        bash ikev2.sh <<ANSWERS
+
+
+
+
+
+
+
+        ANSWERS
+
+        grep -q 'modecfgdns="8.8.8.8 8.8.4.4"' /etc/ipsec.d/ikev2.conf
+        ls -ld /etc/ipsec.d/vpnclient.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient.sswan
+        ls -ld /etc/ipsec.d/vpnclient.p12
+        pk12util -W "" -l /etc/ipsec.d/vpnclient.p12
+        pk12util -W "" -l /etc/ipsec.d/vpnclient.p12 | grep AES-256 && exit 1
+
+        restart_ipsec
+        grep pluto "$log1" | tail -n 20
+        ipsec status | grep -q ikev2-cp
+
+        bash ikev2.sh <<ANSWERS
+        1
+        invalidclient:
+        vpnclient
+        vpnclient2
+
+        ANSWERS
+
+        ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient2.sswan
+        ls -ld /etc/ipsec.d/vpnclient2.p12
+        pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12
+        pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
+
+        rm -f /etc/ipsec.d/vpnclient2*
+        bash ikev2.sh <<ANSWERS
+        2
+        nonexistclient
+        vpnclient2
+        ANSWERS
+
+        ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient2.sswan
+        ls -ld /etc/ipsec.d/vpnclient2.p12
+        pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12
+        pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
+
+        bash ikev2.sh <<ANSWERS
+        3
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS | grep -i "2 clients"
+        3
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS
+        4
+        nonexistclient
+        vpnclient2
+        y
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS 2>&1 | grep -i "abort"
+        4
+        vpnclient2
+
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS
+        5
+        vpnclient2
+        y
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS | grep -i "1 client"
+        3
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS 2>&1 | grep -i "abort"
+        2
+        vpnclient2
+
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS
+        100
+        7
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS 2>&1 | grep -i "abort"
+        6
+
+        ANSWERS
+
+        bash ikev2.sh <<ANSWERS
+        6
+        y
+        ANSWERS
+
+        restart_ipsec
+        ls -ld /etc/ipsec.d/ikev2.conf && exit 1
+        ipsec status | grep -q l2tp-psk
+        ipsec status | grep -q xauth-psk
+        ipsec status | grep -q ikev2-cp && exit 1
+        certutil -L -d sql:/etc/ipsec.d
+
+        rm -f /etc/ipsec.d/vpnclient*
+
+        VPN_DNS_SRV1=invaliddns \
+        bash ikev2.sh --auto 2>&1 | grep -i "invalid"
+
+        if [ "$os_type" = "alpine" ]; then
+          apk del uuidgen
+        else
+          apt-get -yqq remove uuid-runtime
+        fi
+        sed -i '/^include /d' /etc/ipsec.conf
+
+        VPN_CLIENT_NAME=vpnclient1 \
+        VPN_DNS_NAME=vpn.example.com \
+        VPN_DNS_SRV1=1.1.1.1 \
+        VPN_DNS_SRV2=1.0.0.1 \
+        bash ikev2.sh --auto
+
+        grep -q 'leftid=@vpn.example.com' /etc/ipsec.d/ikev2.conf
+        grep -q 'modecfgdns="1.1.1.1 1.0.0.1"' /etc/ipsec.d/ikev2.conf
+        ls -ld /etc/ipsec.d/vpnclient1.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient1.sswan
+        ls -ld /etc/ipsec.d/vpnclient1.p12
+        grep -q 'vpn.example.com' /etc/ipsec.d/vpnclient1.mobileconfig
+        grep -q 'vpn.example.com' /etc/ipsec.d/vpnclient1.sswan
+
+        restart_ipsec
+        ipsec status | grep -q ikev2-cp
+
+        bash ikev2.sh --addclient invalidclient: 2>&1 | grep -i "invalid"
+        bash ikev2.sh --addclient vpnclient1 2>&1 | grep -i "already exists"
+
+        bash ikev2.sh --addclient vpnclient2
+
+        ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient2.sswan
+        ls -ld /etc/ipsec.d/vpnclient2.p12
+
+        bash ikev2.sh --exportclient nonexistclient 2>&1 | grep -i "does not exist"
+
+        rm -f /etc/ipsec.d/vpnclient2*
+        bash ikev2.sh --exportclient vpnclient2
+
+        ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
+        ls -ld /etc/ipsec.d/vpnclient2.sswan
+        ls -ld /etc/ipsec.d/vpnclient2.p12
+
+        bash ikev2.sh --addclient vpnclient2 --exportclient vpnclient2 2>&1 | grep -i "invalid"
+
+        bash ikev2.sh --listclients | grep "vpnclient1 \+valid"
+        bash ikev2.sh --listclients | grep "vpnclient2 \+valid"
+        bash ikev2.sh --listclients | grep "2 clients"
+
+        bash ikev2.sh --revokeclient nonexistclient 2>&1 | grep -i "does not exist"
+        bash ikev2.sh --revokeclient vpnclient2 <<ANSWERS
+        y
+        ANSWERS
+
+        bash ikev2.sh --listclients | grep "vpnclient2 \+revoked"
+        ls -ld /etc/ipsec.d/vpnclient2.mobileconfig && exit 1
+        ls -ld /etc/ipsec.d/vpnclient2.sswan && exit 1
+        ls -ld /etc/ipsec.d/vpnclient2.p12 && exit 1
+
+        bash ikev2.sh --revokeclient vpnclient2 2>&1 | grep -i "already been revoked"
+        bash ikev2.sh --exportclient vpnclient2 2>&1 | grep -i "revoked"
+
+        bash ikev2.sh --deleteclient nonexistclient 2>&1 | grep -i "does not exist"
+        bash ikev2.sh --deleteclient vpnclient1 <<ANSWERS
+        y
+        ANSWERS
+
+        bash ikev2.sh --listclients | grep "1 client"
+        ls -ld /etc/ipsec.d/vpnclient1.mobileconfig && exit 1
+        ls -ld /etc/ipsec.d/vpnclient1.sswan && exit 1
+        ls -ld /etc/ipsec.d/vpnclient1.p12 && exit 1
+
+        bash ikev2.sh -h 2>&1 | grep -i "usage:"
+        bash ikev2.sh --invalidoption 2>&1 | grep -i "usage:"
+
+        bash ikev2.sh --removeikev2 --exportclient vpnclient1 2>&1 | grep -i "invalid"
+        bash ikev2.sh --removeikev2 <<ANSWERS
+        y
+        ANSWERS
+
+        restart_ipsec
+        rm -f /etc/ipsec.d/vpnclient*
+
+        bash ikev2.sh <<ANSWERS
+        y
+        invalidfqdn
+        vpn.example.com
+
+
+        y
+        invaliddns
+        1.1.1.1
+        invaliddns
+        1.0.0.1
+        y
+
+        ANSWERS
+
+        grep -q 'leftid=@vpn.example.com' /etc/ipsec.d/ikev2.conf
+        grep -q 'modecfgdns="1.1.1.1 1.0.0.1"' /etc/ipsec.d/ikev2.conf
+        restart_ipsec
+        ipsec status | grep -q ikev2-cp
+
+        config_file="/etc/ipsec.d/.vpnconfig"
+        p12_pw=$(grep -s '^IKEV2_CONFIG_PASSWORD=.\+' "$config_file" | tail -n 1 | cut -f2- -d= | sed -e "s/^'//" -e "s/'$//")
+        pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient.p12
+        pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient.p12 | grep AES-256 && exit 1
+
+        bash ikev2.sh --addclient vpnclient2
+        pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12
+        pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
+
+        bash ikev2.sh --exportclient vpnclient2
+        pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12
+        pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
+
+        bash ikev2.sh --removeikev2 <<ANSWERS
+        y
+        ANSWERS
+
+        grep -qs '^IKEV2_CONFIG_PASSWORD=.\+' "$config_file" && exit 1
+        restart_ipsec
+        bash ikev2.sh <<ANSWERS
+
+        invalidip
+        1.2.3.4
+        invalidclient:
+        vpnclient1
+        1000
+        12
+        y
+        1.1.1.1
+
+
+
+        ANSWERS
+
+        grep -q 'leftid=1.2.3.4' /etc/ipsec.d/ikev2.conf
+        grep -q 'modecfgdns=1.1.1.1' /etc/ipsec.d/ikev2.conf
+        restart_ipsec
+        ipsec status | grep -q ikev2-cp
+
+        bash ikev2.sh --removeikev2 <<ANSWERS
+        y
+        ANSWERS
+
+        restart_ipsec
+        VPN_DNS_SRV1=1.1.1.1 \
+        bash ikev2.sh --auto
+
+        grep -q 'modecfgdns=1.1.1.1' /etc/ipsec.d/ikev2.conf
+        restart_ipsec
+        ipsec status | grep -q ikev2-cp
+
+        bash ikev2.sh --removeikev2 <<ANSWERS
+        y
+        ANSWERS
+
+        restart_ipsec
+        bash ikev2.sh --auto
+
+        grep -qs '^IKEV2_CONFIG_PASSWORD=.\+' "$config_file" && exit 1
+        grep -q 'modecfgdns="8.8.8.8 8.8.4.4"' /etc/ipsec.d/ikev2.conf
+        restart_ipsec
+        ipsec status | grep -q ikev2-cp
+
+        cp -f "$GITHUB_WORKSPACE"/extras/vpnupgrade.sh ./vpnup.sh
+        sed -i '/curl /a sed -i "/swan_ver_latest=/s/^/#/" "$tmpdir/vpnup.sh"; [ -z "$VPN_SWAN_VER" ] || sed -i "s/^  swan_ver_cur=.*/  swan_ver_cur=$TEST_UPGRADE_FROM/" "$tmpdir/vpnup.sh"; [ "$SHOW_LIBRESWAN_BUILD_OUTPUT" != true ] || sed -i "/^[[:space:]]*make .* -s base .*&& make -s install-base /s# >/dev/null 2>&1##g" "$tmpdir/vpnup.sh"' vpnup.sh
+
+        ver=$TEST_UPGRADE_FROM
+        if [ "$os_type" = "alpine" ] || [ "$os_ver" = "trixiesid" ] || [ "$os_ver" = 13 ] \
+          || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ]; then
+          ipsec whack --shutdown || true
+        fi
+        sed -i "s/^SWAN_VER=.*/SWAN_VER=$ver/" vpnup.sh
+        bash vpnup.sh <<ANSWERS
+
+        ANSWERS
+        check_ipsec_service_install
+        restart_ipsec
+        check_swan_version "$ver"
+        ipsec status | grep -q l2tp-psk
+        ipsec status | grep -q xauth-psk
+        ipsec status | grep -q ikev2-cp
+
+        if [ "$os_type" = "alpine" ]; then
+          cp -f "$GITHUB_WORKSPACE"/extras/vpnupgrade_alpine.sh ./vpnup.sh
+        else
+          cp -f "$GITHUB_WORKSPACE"/extras/vpnupgrade_ubuntu.sh ./vpnup.sh
+        fi
+        set_upgrade_ceiling vpnup.sh "$TEST_UPGRADE_TO"
+        enable_build_output vpnup.sh
+        sed -i '/swan_ver_latest=/s/^/#/' vpnup.sh
+
+        ver=$TEST_UPGRADE_TO
+        if [ "$os_type" = "alpine" ] || [ "$os_ver" = "trixiesid" ] || [ "$os_ver" = 13 ] \
+          || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ]; then
+          ipsec whack --shutdown || true
+        fi
+        VPN_UPDATE_SWAN_VER="$ver" bash vpnup.sh <<ANSWERS
+
+        ANSWERS
+        check_ipsec_service_install
+        restart_ipsec
+        check_swan_version "$ver"
+        ipsec status | grep -q l2tp-psk
+        ipsec status | grep -q xauth-psk
+        ipsec status | grep -q ikev2-cp
+
+        bash ikev2.sh --removeikev2 <<ANSWERS
+        y
+        ANSWERS
+
+        restart_ipsec
+        ls -ld /etc/ipsec.d/ikev2.conf && exit 1
+        ipsec status | grep -q l2tp-psk
+        ipsec status | grep -q xauth-psk
+        ipsec status | grep -q ikev2-cp && exit 1
+        certutil -L -d sql:/etc/ipsec.d
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
+
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
           fi
+        done
 
-          netstat -anpu | grep pluto
-          netstat -anpu | grep xl2tpd
-          iptables -nvL
-          iptables -nvL | grep -q 'ppp+'
-          iptables -nvL | grep -q '192\.168\.43\.0/24'
-          iptables -nvL -t nat
-          iptables -nvL -t nat | grep -q '192\.168\.42\.0/24'
-          iptables -nvL -t nat | grep -q '192\.168\.43\.0/24'
-          grep pluto "$log1"
-          grep xl2tpd "$log2"
-          ipsec status
-          ipsec status | grep -q l2tp-psk
-          ipsec status | grep -q xauth-psk
-          ipsec status | grep -q ikev2-cp
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
 
-          ls -ld /etc/ipsec.d/vpnclient.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient.sswan
-          ls -ld /etc/ipsec.d/vpnclient.p12
-
-          ls -l /usr/bin/ikev2.sh
-          ls -l /usr/bin/addvpnuser.sh
-          ls -l /usr/bin/delvpnuser.sh
-          ls -l /opt/src/ikev2.sh
-          ls -l /opt/src/addvpnuser.sh
-          ls -l /opt/src/delvpnuser.sh
-
-          bash vpnunst.sh <<ANSWERS
-          y
-          ANSWERS
-          rm -f /etc/ipsec.d/vpnclient*
-          if [ "$os_type" = "alpine" ]; then
-            killall pluto || true
-            killall xl2tpd || true
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
           fi
-
-          if [ "$os_type" = "alpine" ]; then
-            cp -f "$GITHUB_WORKSPACE"/vpnsetup_alpine.sh ./vpnsetup.sh
-          else
-            cp -f "$GITHUB_WORKSPACE"/vpnsetup_ubuntu.sh ./vpnsetup.sh
-          fi
-          set_setup_version vpnsetup.sh
-          enable_build_output vpnsetup.sh
-          sed -i -e '/swan_ver_latest=/s/^/#/' \
-            -e '/status=0/a sed -i "/swan_ver_latest=/s/^/#/" /opt/src/ikev2.sh' \
-            vpnsetup.sh
-
-          bash vpnsetup.sh
-          [ -z "$VPN_SWAN_VER" ] || check_swan_version "$VPN_SWAN_VER"
-          check_ipsec_service_install
-
-          VPN_IPSEC_PSK='your_ipsec_pre_shared_key' \
-          VPN_USER='your_vpn_username' \
-          VPN_PASSWORD='your_vpn_password' \
-          VPN_DNS_SRV1='1.1.1.1' \
-          VPN_DNS_SRV2='1.0.0.1' \
-          bash vpnsetup.sh
-
-          if [ "$os_type" = "alpine" ]; then
-            xl2tpd -c /etc/xl2tpd/xl2tpd.conf
-          fi
-          restart_ipsec
-
-          netstat -anpu | grep pluto
-          netstat -anpu | grep xl2tpd
-          iptables -nvL
-          iptables -nvL | grep -q 'ppp+'
-          iptables -nvL | grep -q '192\.168\.43\.0/24'
-          iptables -nvL -t nat
-          iptables -nvL -t nat | grep -q '192\.168\.42\.0/24'
-          iptables -nvL -t nat | grep -q '192\.168\.43\.0/24'
-          ipsec status
-          ipsec status | grep -q l2tp-psk
-          ipsec status | grep -q xauth-psk
-          ipsec status | grep -q ikev2-cp
-
-          grep -q "your_ipsec_pre_shared_key" /etc/ipsec.secrets
-          grep -q "your_vpn_username" /etc/ppp/chap-secrets
-          grep -q "your_vpn_password" /etc/ppp/chap-secrets
-          grep -q "your_vpn_username" /etc/ipsec.d/passwd
-          grep -q 'modecfgdns="1.1.1.1 1.0.0.1"' /etc/ipsec.conf
-          grep -q 'ms-dns 1.1.1.1' /etc/ppp/options.xl2tpd
-          grep -q 'ms-dns 1.0.0.1' /etc/ppp/options.xl2tpd
-
-          ls -ld /etc/ipsec.d/vpnclient.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient.sswan
-          ls -ld /etc/ipsec.d/vpnclient.p12
-
-          ls -l /usr/bin/ikev2.sh
-          ls -l /usr/bin/addvpnuser.sh
-          ls -l /usr/bin/delvpnuser.sh
-          ls -l /opt/src/ikev2.sh
-          ls -l /opt/src/addvpnuser.sh
-          ls -l /opt/src/delvpnuser.sh
-
-          rm -f /usr/bin/ikev2.sh /opt/src/ikev2.sh
-          rm -f /etc/ipsec.d/vpnclient*
-
-          cp -f "$GITHUB_WORKSPACE"/extras/ikev2setup.sh ./ikev2.sh
-          sed -i '/swan_ver_latest=/s/^/#/' ikev2.sh
-
-          bash ikev2.sh --removeikev2 <<ANSWERS
-          y
-          ANSWERS
-
-          restart_ipsec
-
-          bash ikev2.sh <<ANSWERS
-
-
-
-
-
-
-
-          ANSWERS
-
-          grep -q 'modecfgdns="8.8.8.8 8.8.4.4"' /etc/ipsec.d/ikev2.conf
-          ls -ld /etc/ipsec.d/vpnclient.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient.sswan
-          ls -ld /etc/ipsec.d/vpnclient.p12
-          pk12util -W "" -l /etc/ipsec.d/vpnclient.p12
-          pk12util -W "" -l /etc/ipsec.d/vpnclient.p12 | grep AES-256 && exit 1
-
-          restart_ipsec
-          grep pluto "$log1" | tail -n 20
-          ipsec status | grep -q ikev2-cp
-
-          bash ikev2.sh <<ANSWERS
-          1
-          invalidclient:
-          vpnclient
-          vpnclient2
-
-          ANSWERS
-
-          ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient2.sswan
-          ls -ld /etc/ipsec.d/vpnclient2.p12
-          pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12
-          pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
-
-          rm -f /etc/ipsec.d/vpnclient2*
-          bash ikev2.sh <<ANSWERS
-          2
-          nonexistclient
-          vpnclient2
-          ANSWERS
-
-          ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient2.sswan
-          ls -ld /etc/ipsec.d/vpnclient2.p12
-          pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12
-          pk12util -W "" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
-
-          bash ikev2.sh <<ANSWERS
-          3
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS | grep -i "2 clients"
-          3
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS
-          4
-          nonexistclient
-          vpnclient2
-          y
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS 2>&1 | grep -i "abort"
-          4
-          vpnclient2
-
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS
-          5
-          vpnclient2
-          y
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS | grep -i "1 client"
-          3
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS 2>&1 | grep -i "abort"
-          2
-          vpnclient2
-
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS
-          100
-          7
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS 2>&1 | grep -i "abort"
-          6
-
-          ANSWERS
-
-          bash ikev2.sh <<ANSWERS
-          6
-          y
-          ANSWERS
-
-          restart_ipsec
-          ls -ld /etc/ipsec.d/ikev2.conf && exit 1
-          ipsec status | grep -q l2tp-psk
-          ipsec status | grep -q xauth-psk
-          ipsec status | grep -q ikev2-cp && exit 1
-          certutil -L -d sql:/etc/ipsec.d
-
-          rm -f /etc/ipsec.d/vpnclient*
-
-          VPN_DNS_SRV1=invaliddns \
-          bash ikev2.sh --auto 2>&1 | grep -i "invalid"
-
-          if [ "$os_type" = "alpine" ]; then
-            apk del uuidgen
-          else
-            apt-get -yqq remove uuid-runtime
-          fi
-          sed -i '/^include /d' /etc/ipsec.conf
-
-          VPN_CLIENT_NAME=vpnclient1 \
-          VPN_DNS_NAME=vpn.example.com \
-          VPN_DNS_SRV1=1.1.1.1 \
-          VPN_DNS_SRV2=1.0.0.1 \
-          bash ikev2.sh --auto
-
-          grep -q 'leftid=@vpn.example.com' /etc/ipsec.d/ikev2.conf
-          grep -q 'modecfgdns="1.1.1.1 1.0.0.1"' /etc/ipsec.d/ikev2.conf
-          ls -ld /etc/ipsec.d/vpnclient1.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient1.sswan
-          ls -ld /etc/ipsec.d/vpnclient1.p12
-          grep -q 'vpn.example.com' /etc/ipsec.d/vpnclient1.mobileconfig
-          grep -q 'vpn.example.com' /etc/ipsec.d/vpnclient1.sswan
-
-          restart_ipsec
-          ipsec status | grep -q ikev2-cp
-
-          bash ikev2.sh --addclient invalidclient: 2>&1 | grep -i "invalid"
-          bash ikev2.sh --addclient vpnclient1 2>&1 | grep -i "already exists"
-
-          bash ikev2.sh --addclient vpnclient2
-
-          ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient2.sswan
-          ls -ld /etc/ipsec.d/vpnclient2.p12
-
-          bash ikev2.sh --exportclient nonexistclient 2>&1 | grep -i "does not exist"
-
-          rm -f /etc/ipsec.d/vpnclient2*
-          bash ikev2.sh --exportclient vpnclient2
-
-          ls -ld /etc/ipsec.d/vpnclient2.mobileconfig
-          ls -ld /etc/ipsec.d/vpnclient2.sswan
-          ls -ld /etc/ipsec.d/vpnclient2.p12
-
-          bash ikev2.sh --addclient vpnclient2 --exportclient vpnclient2 2>&1 | grep -i "invalid"
-
-          bash ikev2.sh --listclients | grep "vpnclient1 \+valid"
-          bash ikev2.sh --listclients | grep "vpnclient2 \+valid"
-          bash ikev2.sh --listclients | grep "2 clients"
-
-          bash ikev2.sh --revokeclient nonexistclient 2>&1 | grep -i "does not exist"
-          bash ikev2.sh --revokeclient vpnclient2 <<ANSWERS
-          y
-          ANSWERS
-
-          bash ikev2.sh --listclients | grep "vpnclient2 \+revoked"
-          ls -ld /etc/ipsec.d/vpnclient2.mobileconfig && exit 1
-          ls -ld /etc/ipsec.d/vpnclient2.sswan && exit 1
-          ls -ld /etc/ipsec.d/vpnclient2.p12 && exit 1
-
-          bash ikev2.sh --revokeclient vpnclient2 2>&1 | grep -i "already been revoked"
-          bash ikev2.sh --exportclient vpnclient2 2>&1 | grep -i "revoked"
-
-          bash ikev2.sh --deleteclient nonexistclient 2>&1 | grep -i "does not exist"
-          bash ikev2.sh --deleteclient vpnclient1 <<ANSWERS
-          y
-          ANSWERS
-
-          bash ikev2.sh --listclients | grep "1 client"
-          ls -ld /etc/ipsec.d/vpnclient1.mobileconfig && exit 1
-          ls -ld /etc/ipsec.d/vpnclient1.sswan && exit 1
-          ls -ld /etc/ipsec.d/vpnclient1.p12 && exit 1
-
-          bash ikev2.sh -h 2>&1 | grep -i "usage:"
-          bash ikev2.sh --invalidoption 2>&1 | grep -i "usage:"
-
-          bash ikev2.sh --removeikev2 --exportclient vpnclient1 2>&1 | grep -i "invalid"
-          bash ikev2.sh --removeikev2 <<ANSWERS
-          y
-          ANSWERS
-
-          restart_ipsec
-          rm -f /etc/ipsec.d/vpnclient*
-
-          bash ikev2.sh <<ANSWERS
-          y
-          invalidfqdn
-          vpn.example.com
-
-
-          y
-          invaliddns
-          1.1.1.1
-          invaliddns
-          1.0.0.1
-          y
-
-          ANSWERS
-
-          grep -q 'leftid=@vpn.example.com' /etc/ipsec.d/ikev2.conf
-          grep -q 'modecfgdns="1.1.1.1 1.0.0.1"' /etc/ipsec.d/ikev2.conf
-          restart_ipsec
-          ipsec status | grep -q ikev2-cp
-
-          config_file="/etc/ipsec.d/.vpnconfig"
-          p12_pw=$(grep -s '^IKEV2_CONFIG_PASSWORD=.\+' "$config_file" | tail -n 1 | cut -f2- -d= | sed -e "s/^'//" -e "s/'$//")
-          pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient.p12
-          pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient.p12 | grep AES-256 && exit 1
-
-          bash ikev2.sh --addclient vpnclient2
-          pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12
-          pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
-
-          bash ikev2.sh --exportclient vpnclient2
-          pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12
-          pk12util -W "$p12_pw" -l /etc/ipsec.d/vpnclient2.p12 | grep AES-256 && exit 1
-
-          bash ikev2.sh --removeikev2 <<ANSWERS
-          y
-          ANSWERS
-
-          grep -qs '^IKEV2_CONFIG_PASSWORD=.\+' "$config_file" && exit 1
-          restart_ipsec
-          bash ikev2.sh <<ANSWERS
-
-          invalidip
-          1.2.3.4
-          invalidclient:
-          vpnclient1
-          1000
-          12
-          y
-          1.1.1.1
-
-
-
-          ANSWERS
-
-          grep -q 'leftid=1.2.3.4' /etc/ipsec.d/ikev2.conf
-          grep -q 'modecfgdns=1.1.1.1' /etc/ipsec.d/ikev2.conf
-          restart_ipsec
-          ipsec status | grep -q ikev2-cp
-
-          bash ikev2.sh --removeikev2 <<ANSWERS
-          y
-          ANSWERS
-
-          restart_ipsec
-          VPN_DNS_SRV1=1.1.1.1 \
-          bash ikev2.sh --auto
-
-          grep -q 'modecfgdns=1.1.1.1' /etc/ipsec.d/ikev2.conf
-          restart_ipsec
-          ipsec status | grep -q ikev2-cp
-
-          bash ikev2.sh --removeikev2 <<ANSWERS
-          y
-          ANSWERS
-
-          restart_ipsec
-          bash ikev2.sh --auto
-
-          grep -qs '^IKEV2_CONFIG_PASSWORD=.\+' "$config_file" && exit 1
-          grep -q 'modecfgdns="8.8.8.8 8.8.4.4"' /etc/ipsec.d/ikev2.conf
-          restart_ipsec
-          ipsec status | grep -q ikev2-cp
-
-          cp -f "$GITHUB_WORKSPACE"/extras/vpnupgrade.sh ./vpnup.sh
-          sed -i '/curl /a sed -i "/swan_ver_latest=/s/^/#/" "$tmpdir/vpnup.sh"; [ -z "$VPN_SWAN_VER" ] || sed -i "s/^  swan_ver_cur=.*/  swan_ver_cur=$TEST_UPGRADE_FROM/" "$tmpdir/vpnup.sh"; [ "$SHOW_LIBRESWAN_BUILD_OUTPUT" != true ] || sed -i "/^[[:space:]]*make .* -s base .*&& make -s install-base /s# >/dev/null 2>&1##g" "$tmpdir/vpnup.sh"' vpnup.sh
-
-          ver=$TEST_UPGRADE_FROM
-          if [ "$os_type" = "alpine" ] || [ "$os_ver" = "trixiesid" ] || [ "$os_ver" = 13 ] \
-            || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ]; then
-            ipsec whack --shutdown || true
-          fi
-          sed -i "s/^SWAN_VER=.*/SWAN_VER=$ver/" vpnup.sh
-          bash vpnup.sh <<ANSWERS
-
-          ANSWERS
-          check_ipsec_service_install
-          restart_ipsec
-          check_swan_version "$ver"
-          ipsec status | grep -q l2tp-psk
-          ipsec status | grep -q xauth-psk
-          ipsec status | grep -q ikev2-cp
-
-          if [ "$os_type" = "alpine" ]; then
-            cp -f "$GITHUB_WORKSPACE"/extras/vpnupgrade_alpine.sh ./vpnup.sh
-          else
-            cp -f "$GITHUB_WORKSPACE"/extras/vpnupgrade_ubuntu.sh ./vpnup.sh
-          fi
-          set_upgrade_ceiling vpnup.sh "$TEST_UPGRADE_TO"
-          enable_build_output vpnup.sh
-          sed -i '/swan_ver_latest=/s/^/#/' vpnup.sh
-
-          ver=$TEST_UPGRADE_TO
-          if [ "$os_type" = "alpine" ] || [ "$os_ver" = "trixiesid" ] || [ "$os_ver" = 13 ] \
-            || [ "$os_ver" = "forkysid" ] || [ "$os_ver" = 14 ]; then
-            ipsec whack --shutdown || true
-          fi
-          VPN_UPDATE_SWAN_VER="$ver" bash vpnup.sh <<ANSWERS
-
-          ANSWERS
-          check_ipsec_service_install
-          restart_ipsec
-          check_swan_version "$ver"
-          ipsec status | grep -q l2tp-psk
-          ipsec status | grep -q xauth-psk
-          ipsec status | grep -q ikev2-cp
-
-          bash ikev2.sh --removeikev2 <<ANSWERS
-          y
-          ANSWERS
-
-          restart_ipsec
-          ls -ld /etc/ipsec.d/ikev2.conf && exit 1
-          ipsec status | grep -q l2tp-psk
-          ipsec status | grep -q xauth-psk
-          ipsec status | grep -q ikev2-cp && exit 1
-          certutil -L -d sql:/etc/ipsec.d
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
