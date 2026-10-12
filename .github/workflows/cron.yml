@@ -10,8 +10,7 @@
 name: build cron
 
 on:
-  schedule:
-    - cron: '30 3 * * 1,4'
+  workflow_dispatch:
 
 permissions:
   contents: read
